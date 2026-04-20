@@ -235,7 +235,7 @@ const JSON_HEADERS = {
   'Access-Control-Allow-Origin': '*',
 };
 
-const httpServer = http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
   const pathname = (req.url || '').split('?')[0];
 
   if (req.method === 'OPTIONS' && pathname === '/api/rooms') {
@@ -255,15 +255,23 @@ const httpServer = http.createServer((req, res) => {
     return;
   }
 
-  if (pathname === '/' || pathname === '/health') {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
+  if (pathname === '/') {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('WebSocket backend is running');
+    return;
+  }
+
+  if (pathname === '/health' || pathname === '/healthz') {
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
     res.end('ok');
     return;
   }
-  res.writeHead(404);
-  res.end();
+
+  res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end('Not found');
 });
 
+const wss = new WebSocketServer({ server });
 
 // CONNECTION PIPELINE — stages when a client connects over WebSocket
 
@@ -274,16 +282,14 @@ const httpServer = http.createServer((req, res) => {
 // 4. On join / room move / disconnect → membership changes; room_stats broadcast to every WS client
 // 5. On join → assign room, broadcast presence to that room, send snapshot to that client
 
-const webSocketServer = new WebSocketServer({ server: httpServer });
-
 function broadcastRoomStatsToAll() {
   const text = JSON.stringify(buildRoomStatsMessage());
-  for (const client of webSocketServer.clients) {
+  for (const client of wss.clients) {
     if (client.readyState === WS_OPEN) client.send(text);
   }
 }
 
-webSocketServer.on('connection', (socket) => {
+wss.on('connection', (socket) => {
   if (socket.readyState === WS_OPEN) {
     socket.send(JSON.stringify(buildRoomStatsMessage()));
   }
@@ -305,13 +311,15 @@ webSocketServer.on('connection', (socket) => {
   });
 });
 
-httpServer.listen(LISTEN_PORT, () => {
+/** Render (and many hosts) require binding to all interfaces; PORT comes from the platform. */
+const LISTEN_HOST = process.env.LISTEN_HOST || '0.0.0.0';
+
+server.listen(LISTEN_PORT, LISTEN_HOST, () => {
+  console.log(`Server running on port ${LISTEN_PORT}`);
   for (const id of Object.keys(rooms)) {
     const room = rooms[id];
     room.currentStepEndsAtMs = Date.now() + room.steps[room.stepIndexInCycle].durationMs;
     scheduleNextBoundary(room);
   }
-  console.log(
-    `HTTP + WebSocket on ${LISTEN_PORT} — rooms: ${Object.keys(rooms).join(', ')} — GET room stats: http://localhost:${LISTEN_PORT}/api/rooms`,
-  );
+  console.log(`Breathing rooms: ${Object.keys(rooms).join(', ')} — GET /api/rooms for per-room counts`);
 });

@@ -10,11 +10,16 @@ Shared breathing sessions: a **Node** WebSocket server plus a **Vue** web UI. Th
    npm install
    ```
 
-2. **Config (web app)** — create `.env.local` in the project root:
+2. **Config (web app)** — copy `.env.example` to `.env.local` or set:
 
    ```bash
    VITE_WS_URL=ws://localhost:8085
    ```
+
+   **Production / Render:** the browser needs **`wss://`** (TLS), not `ws://localhost`. Example:
+
+   `VITE_WS_URL=wss://your-service-name.onrender.com`  
+   Set this **before** `npm run build` so Vite bakes it into the client.
 
 3. **Run two terminals**
 
@@ -25,7 +30,19 @@ Shared breathing sessions: a **Node** WebSocket server plus a **Vue** web UI. Th
 
 4. Open the URL Vite prints (e.g. `http://localhost:5173`). Pick a room after the page connects.
 
-**Port:** Override the server with `PORT=3000 npm start` — then set `VITE_WS_URL` to match (e.g. `ws://localhost:3000`).
+**Port:** Locally, override with `PORT=3000 npm start` and set `VITE_WS_URL` to match (e.g. `ws://localhost:3000`).
+
+## Deploy on Render (Web Service)
+
+1. Create a **Web Service** connected to this repo.
+2. **Build command:** `npm install`  
+3. **Start command:** `npm start`  
+4. Render sets **`PORT`** automatically — the server reads `process.env.PORT` (see `server/index.js`). Do **not** hardcode the port in production.
+5. The server listens on **`0.0.0.0`**, which Render expects.
+6. **Frontend:** build the Vue app with `VITE_WS_URL=wss://<your-render-host>.onrender.com` (same host as the service, **`wss` not `ws`**). Deploy the `dist/` folder as a static site, or host the UI elsewhere with that env at build time.
+7. Optional: use [`render.yaml`](render.yaml) as a starting Blueprint.
+
+**Room stats HTTP:** `https://<your-host>.onrender.com/api/rooms`
 
 ## Other commands
 

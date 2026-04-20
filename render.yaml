@@ -1,0 +1,10 @@
+# Optional Render Blueprint — connect the repo in the dashboard and tweak as needed.
+# https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: breathing-room-server
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health

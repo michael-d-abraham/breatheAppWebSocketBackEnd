@@ -55,3 +55,5 @@ Same JSON object as HTTP (including `type: "room_stats"`). Clients already in a 
 
 - `EXPO_PUBLIC_API_BASE_URL` or similar — e.g. `http://localhost:8085` on device simulators; use your LAN IP for physical devices.
 - `http://localhost:8085/api/rooms` for dev.
+
+**Render / HTTPS:** use `https://your-app.onrender.com/api/rooms` and WebSocket `wss://your-app.onrender.com` (not `ws://localhost`).
