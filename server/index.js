@@ -2,7 +2,11 @@
  * Breathing room — Node WebSocket server
  *
  * Multiple rooms share one process; each room has its own breath timeline and connections.
- * Protocol: snapshot | phase | presence (JSON on the wire).
+ * Protocol: snapshot | phase | presence | room_stats (JSON on the wire).
+ *
+ * Environment (see server/ENV.md):
+ *   PORT        — required in production (Render sets automatically); local default 8085
+ *   LISTEN_HOST — optional bind address (default 0.0.0.0)
  */
 
 const http = require('http');
@@ -11,6 +15,33 @@ const { WebSocketServer } = require('ws');
 const LISTEN_PORT = Number(process.env.PORT) || 8085;
 const WS_OPEN = 1;
 
+const MAX_WS_MESSAGE_BYTES = 64 * 1024;
+const MAX_ROOM_STRING_LEN = 64;
+const HEARTBEAT_MS = 30000;
+
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+
+function logInfo(msg, meta) {
+  const line = meta != null ? `${msg} ${JSON.stringify(meta)}` : msg;
+  console.log(`[breath] ${new Date().toISOString()} ${line}`);
+}
+
+function logWarn(msg, meta) {
+  const line = meta != null ? `${msg} ${JSON.stringify(meta)}` : msg;
+  console.warn(`[breath] ${new Date().toISOString()} ${line}`);
+}
+
+function logError(msg, err, meta) {
+  const line = meta != null ? `${msg} ${JSON.stringify(meta)}` : msg;
+  if (err != null && typeof err === 'object' && err.message) {
+    console.error(`[breath] ${new Date().toISOString()} ${line}`, err.stack || err.message);
+  } else if (err != null) {
+    console.error(`[breath] ${new Date().toISOString()} ${line}`, err);
+  } else {
+    console.error(`[breath] ${new Date().toISOString()} ${line}`);
+  }
+}
+
 /** Seconds per step: inhale, hold1, exhale, hold2 — same shape as useBreathingCycle. */
 const ROOM_PATTERNS = {
   deep: { inhaleSec: 6, hold1Sec: 0, exhaleSec: 6, hold2Sec: 0 },
@@ -18,8 +49,6 @@ const ROOM_PATTERNS = {
   'extended-exhale': { inhaleSec: 4, hold1Sec: 0, exhaleSec: 6, hold2Sec: 0 },
 };
 
-
-// my app expects patterns is milliseconds
 function buildStepsFromPatternSeconds(patternSec) {
   return [
     { name: 'inhale', durationMs: patternSec.inhaleSec * 1000 },
@@ -60,20 +89,6 @@ for (const id of Object.keys(ROOM_PATTERNS)) {
   rooms[id] = createRoom(id);
 }
 
-// OUTGOING DATA — websocket "protocal" 
-//
-// | type        | When sent                         | Main purpose |
-// |-------------|-----------------------------------|--------------|
-// | snapshot    | New connection; after client join | Full state + pattern + count |
-// | phase       | Each breath step boundary         | Timing + phase + participantCount |
-// | presence    | Someone connects or disconnects   | participantCount only |
-// | room_stats  | New WS connection; any room count change | All canonical room sizes (picker / lobby) |
-//
-// All timing messages include serverTimeMs + phaseEndsAtMs so clients can sync clocks.
-
-
-
-// Full picture of current States
 function buildSnapshotMessage(room) {
   const serverTimeMs = Date.now();
   const step = room.steps[room.stepIndexInCycle];
@@ -91,8 +106,6 @@ function buildSnapshotMessage(room) {
   };
 }
 
-// On one phase information 
-// send every time the phase moves to the next step. 
 function buildPhaseMessage(room) {
   const serverTimeMs = Date.now();
   const step = room.steps[room.stepIndexInCycle];
@@ -109,8 +122,6 @@ function buildPhaseMessage(room) {
   };
 }
 
-// On someone connects or disconnects
-// send the participantCount only
 function buildPresenceMessage(room) {
   return {
     type: 'presence',
@@ -120,14 +131,22 @@ function buildPresenceMessage(room) {
   };
 }
 
-function sendJsonToRoom(room, payload) {
-  const text = JSON.stringify(payload);
-  for (const socket of room.connections) {
-    if (socket.readyState === WS_OPEN) socket.send(text);
+function safeSend(ws, text) {
+  if (ws.readyState !== WS_OPEN) return;
+  try {
+    ws.send(text);
+  } catch (err) {
+    logWarn('websocket send failed', { message: err.message });
   }
 }
 
-/** Same numbers as participantCount in snapshot/presence: open WS connections assigned to each room. */
+function sendJsonToRoom(room, payload) {
+  const text = JSON.stringify(payload);
+  for (const socket of room.connections) {
+    safeSend(socket, text);
+  }
+}
+
 function buildRoomStatsMessage() {
   const roomsOut = {};
   for (const id of Object.keys(ROOM_PATTERNS)) {
@@ -188,7 +207,7 @@ function onScheduledBoundary(room) {
 }
 
 // -----------------------------------------------------------------------------
-// Assign socket to a room (join / default on connect)
+// Assign socket to a room (join)
 // -----------------------------------------------------------------------------
 
 function assignSocketToRoom(socket, rawRoomId) {
@@ -198,7 +217,7 @@ function assignSocketToRoom(socket, rawRoomId) {
 
   if (prevId === id) {
     if (socket.readyState === WS_OPEN) {
-      socket.send(JSON.stringify(buildSnapshotMessage(room)));
+      safeSend(socket, JSON.stringify(buildSnapshotMessage(room)));
     }
     return;
   }
@@ -212,7 +231,7 @@ function assignSocketToRoom(socket, rawRoomId) {
   room.connections.add(socket);
   sendJsonToRoom(room, buildPresenceMessage(room));
   if (socket.readyState === WS_OPEN) {
-    socket.send(JSON.stringify(buildSnapshotMessage(room)));
+    safeSend(socket, JSON.stringify(buildSnapshotMessage(room)));
   }
   broadcastRoomStatsToAll();
 }
@@ -271,55 +290,162 @@ const server = http.createServer((req, res) => {
   res.end('Not found');
 });
 
-const wss = new WebSocketServer({ server });
-
-// CONNECTION PIPELINE — stages when a client connects over WebSocket
-
-//
-// 1. TCP accepted → HTTP upgrade → WebSocket OPEN
-// 2. Immediate room_stats JSON (all canonical room counts) for pickers not yet joined
-// 3. Socket is not in any room until the client sends { type: "join", room: "<id>" }
-// 4. On join / room move / disconnect → membership changes; room_stats broadcast to every WS client
-// 5. On join → assign room, broadcast presence to that room, send snapshot to that client
+const wss = new WebSocketServer({
+  server,
+  perMessageDeflate: false,
+  clientTracking: true,
+});
 
 function broadcastRoomStatsToAll() {
   const text = JSON.stringify(buildRoomStatsMessage());
   for (const client of wss.clients) {
-    if (client.readyState === WS_OPEN) client.send(text);
+    safeSend(client, text);
   }
 }
 
-wss.on('connection', (socket) => {
-  if (socket.readyState === WS_OPEN) {
-    socket.send(JSON.stringify(buildRoomStatsMessage()));
+/** Validate join payload; ignore unknown message shapes safely. */
+function parseJoinMessage(rawBuffer) {
+  if (!rawBuffer || rawBuffer.length > MAX_WS_MESSAGE_BYTES) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(rawBuffer.toString());
+  } catch {
+    return null;
   }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  if (parsed.type !== 'join') return null;
+  const room = parsed.room;
+  if (room != null && typeof room !== 'string') return null;
+  if (typeof room === 'string' && room.length > MAX_ROOM_STRING_LEN) return null;
+  return { room };
+}
 
-  socket.on('message', (rawBuffer) => {
-    let parsed;
-    try {
-      parsed = JSON.parse(rawBuffer.toString());
-    } catch {
+function clientLabel(req) {
+  const xf = req.headers['x-forwarded-for'];
+  const fromXf = typeof xf === 'string' ? xf.split(',')[0].trim() : '';
+  return fromXf || req.socket?.remoteAddress || 'unknown';
+}
+
+let heartbeatTimer = null;
+
+function startHeartbeat() {
+  heartbeatTimer = setInterval(() => {
+    wss.clients.forEach((ws) => {
+      if (ws.isAlive === false) {
+        logInfo('websocket terminating stale client');
+        try {
+          ws.terminate();
+        } catch (err) {
+          logWarn('terminate failed', { message: err.message });
+        }
+        return;
+      }
+      ws.isAlive = false;
+      try {
+        ws.ping();
+      } catch (err) {
+        logWarn('ping failed', { message: err.message });
+      }
+    });
+  }, HEARTBEAT_MS);
+  if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref();
+}
+
+wss.on('connection', (ws, req) => {
+  const label = clientLabel(req);
+  ws.__clientLabel = label;
+  ws.isAlive = true;
+  ws.on('pong', () => {
+    ws.isAlive = true;
+  });
+
+  logInfo('websocket client connected', { client: label, clients: wss.clients.size });
+
+  safeSend(ws, JSON.stringify(buildRoomStatsMessage()));
+
+  ws.on('message', (rawBuffer) => {
+    const join = parseJoinMessage(rawBuffer);
+    if (join == null) {
+      if (rawBuffer && rawBuffer.length > MAX_WS_MESSAGE_BYTES) {
+        logWarn('websocket message rejected (too large)', { client: label, bytes: rawBuffer.length });
+      }
       return;
     }
-    if (parsed && parsed.type === 'join') {
-      assignSocketToRoom(socket, parsed.room);
+    logInfo('websocket message received', { client: label, type: 'join', roomLen: join.room ? join.room.length : 0 });
+    try {
+      assignSocketToRoom(ws, join.room);
+    } catch (err) {
+      logError('assignSocketToRoom failed', err, { client: label });
     }
   });
 
-  socket.on('close', () => {
-    removeSocketFromRoom(socket);
+  ws.on('close', (code, reason) => {
+    const r = reason && reason.length ? reason.toString() : '';
+    logInfo('websocket client disconnected', { client: label, code, reason: r || undefined });
+    try {
+      removeSocketFromRoom(ws);
+    } catch (err) {
+      logError('removeSocketFromRoom failed', err, { client: label });
+    }
   });
+
+  ws.on('error', (err) => {
+    logError('websocket socket error', err, { client: label });
+  });
+});
+
+wss.on('error', (err) => {
+  logError('WebSocketServer error', err);
+});
+
+server.on('error', (err) => {
+  logError('HTTP server error', err);
+  process.exit(1);
 });
 
 /** Render (and many hosts) require binding to all interfaces; PORT comes from the platform. */
 const LISTEN_HOST = process.env.LISTEN_HOST || '0.0.0.0';
 
-server.listen(LISTEN_PORT, LISTEN_HOST, () => {
-  console.log(`Server running on port ${LISTEN_PORT}`);
+function startBreathTimers() {
   for (const id of Object.keys(rooms)) {
     const room = rooms[id];
     room.currentStepEndsAtMs = Date.now() + room.steps[room.stepIndexInCycle].durationMs;
     scheduleNextBoundary(room);
   }
-  console.log(`Breathing rooms: ${Object.keys(rooms).join(', ')} — GET /api/rooms for per-room counts`);
+}
+
+function shutdown(signal) {
+  logInfo('shutdown', { signal });
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+  for (const id of Object.keys(rooms)) {
+    cancelScheduledBoundary(rooms[id]);
+  }
+  try {
+    wss.close(() => {});
+  } catch (err) {
+    logWarn('wss.close', { message: err.message });
+  }
+  server.close(() => {
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(0), 10000).unref();
+}
+
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.once('SIGINT', () => shutdown('SIGINT'));
+
+server.listen(LISTEN_PORT, LISTEN_HOST, () => {
+  logInfo('server started', {
+    port: LISTEN_PORT,
+    host: LISTEN_HOST,
+    nodeEnv: process.env.NODE_ENV || 'development',
+    production: IS_PRODUCTION,
+  });
+  startBreathTimers();
+  startHeartbeat();
+  logInfo('breath timers running', { rooms: Object.keys(rooms) });
+  logInfo('http routes', { root: '/', health: '/health, /healthz', roomStats: 'GET /api/rooms' });
 });

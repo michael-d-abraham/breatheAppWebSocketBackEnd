@@ -42,7 +42,9 @@ Shared breathing sessions: a **Node** WebSocket server plus a **Vue** web UI. Th
 6. **Frontend:** build the Vue app with `VITE_WS_URL=wss://<your-render-host>.onrender.com` (same host as the service, **`wss` not `ws`**). Deploy the `dist/` folder as a static site, or host the UI elsewhere with that env at build time.
 7. Optional: use [`render.yaml`](render.yaml) as a starting Blueprint.
 
-**Room stats HTTP:** `https://<your-host>.onrender.com/api/rooms`
+**Room stats HTTP:** `https://<your-host>.onrender.com/api/rooms` (e.g. `https://api.hellobreathbro.app/api/rooms`)
+
+Backend env reference: [`server/ENV.md`](server/ENV.md).
 
 ## Other commands
 
