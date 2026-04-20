@@ -1,0 +1,30 @@
+{
+  "name": "s26-websocket-michael-d-abraham",
+  "version": "1.0.0",
+  "description": "Breathing room — Node WebSocket server + Vue client",
+  "homepage": "https://github.com/se4200/s26-websocket-michael-d-abraham#readme",
+  "bugs": {
+    "url": "https://github.com/se4200/s26-websocket-michael-d-abraham/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/se4200/s26-websocket-michael-d-abraham.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "start": "node server/index.js"
+  },
+  "dependencies": {
+    "vue": "^3.5.13",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "vite": "^6.0.7"
+  }
+}
