@@ -46,8 +46,15 @@ Shared breathing sessions: a **Node** WebSocket server plus a **Vue** web UI. Th
 
 Backend env reference: [`server/ENV.md`](server/ENV.md).
 
+## Global Room (presence + pulses)
+
+A second, independent WebSocket endpoint at **`/global`** (same server, same deploy). Users appear as
+dots on a world map and can send one gentle pulse to everyone. The breathing rooms above are
+unchanged. Protocol, limits and privacy model: [`server/GLOBAL_PRESENCE.md`](server/GLOBAL_PRESENCE.md).
+
 ## Other commands
 
+- `npm test` — server tests (`node:test`, no extra dependencies)  
 - `npm run build` — production build  
 - `npm run preview` — preview the built app  
 

@@ -4,13 +4,19 @@
  * Multiple rooms share one process; each room has its own breath timeline and connections.
  * Protocol: snapshot | phase | presence | room_stats (JSON on the wire).
  *
+ * Global Room (presence + pulses) lives on its own WebSocket path, `/global`, with its own
+ * protocol (see server/GLOBAL_PRESENCE.md). Every other path keeps the original breathing-room
+ * protocol above, so already-released app builds are unaffected.
+ *
  * Environment (see server/ENV.md):
- *   PORT        — required in production (Render sets automatically); local default 8085
- *   LISTEN_HOST — optional bind address (default 0.0.0.0)
+ *   PORT         — required in production (Render sets automatically); local default 8085
+ *   LISTEN_HOST  — optional bind address (default 0.0.0.0)
+ *   DEV_COUNTRY  — optional ISO country code used for /global when no Cloudflare header (local dev)
  */
 
 const http = require('http');
 const { WebSocketServer } = require('ws');
+const { createPresenceRoom, MAX_MESSAGE_BYTES: GLOBAL_MAX_MESSAGE_BYTES } = require('./presence');
 
 const LISTEN_PORT = Number(process.env.PORT) || 8085;
 const WS_OPEN = 1;
@@ -290,10 +296,52 @@ const server = http.createServer((req, res) => {
   res.end('Not found');
 });
 
+// Both WebSocket servers use `noServer`; the single `upgrade` handler below routes by path.
+// Previously `wss` attached itself to every upgrade, which would also capture `/global`.
 const wss = new WebSocketServer({
-  server,
+  noServer: true,
   perMessageDeflate: false,
   clientTracking: true,
+});
+
+const GLOBAL_WS_PATH = '/global';
+
+const globalWss = new WebSocketServer({
+  noServer: true,
+  perMessageDeflate: false,
+  clientTracking: true,
+  maxPayload: GLOBAL_MAX_MESSAGE_BYTES,
+});
+
+// Presence logs carry counts only — never IPs, countries or coordinates.
+const globalRoom = createPresenceRoom({
+  fallbackCountry: process.env.DEV_COUNTRY,
+  log: { info: logInfo, warn: logWarn },
+});
+
+server.on('upgrade', (req, socket, head) => {
+  try {
+    const pathname = (req.url || '').split('?')[0];
+    const target = pathname === GLOBAL_WS_PATH ? globalWss : wss;
+    target.handleUpgrade(req, socket, head, (ws) => {
+      target.emit('connection', ws, req);
+    });
+  } catch (err) {
+    logError('websocket upgrade failed', err);
+    socket.destroy();
+  }
+});
+
+globalWss.on('connection', (ws, req) => {
+  ws.isAlive = true;
+  ws.on('pong', () => {
+    ws.isAlive = true;
+  });
+  globalRoom.handleConnection(ws, req);
+});
+
+globalWss.on('error', (err) => {
+  logError('Global WebSocketServer error', err);
 });
 
 function broadcastRoomStatsToAll() {
@@ -330,22 +378,24 @@ let heartbeatTimer = null;
 
 function startHeartbeat() {
   heartbeatTimer = setInterval(() => {
-    wss.clients.forEach((ws) => {
-      if (ws.isAlive === false) {
-        logInfo('websocket terminating stale client');
-        try {
-          ws.terminate();
-        } catch (err) {
-          logWarn('terminate failed', { message: err.message });
+    [wss, globalWss].forEach((socketServer) => {
+      socketServer.clients.forEach((ws) => {
+        if (ws.isAlive === false) {
+          logInfo('websocket terminating stale client');
+          try {
+            ws.terminate();
+          } catch (err) {
+            logWarn('terminate failed', { message: err.message });
+          }
+          return;
         }
-        return;
-      }
-      ws.isAlive = false;
-      try {
-        ws.ping();
-      } catch (err) {
-        logWarn('ping failed', { message: err.message });
-      }
+        ws.isAlive = false;
+        try {
+          ws.ping();
+        } catch (err) {
+          logWarn('ping failed', { message: err.message });
+        }
+      });
     });
   }, HEARTBEAT_MS);
   if (typeof heartbeatTimer.unref === 'function') heartbeatTimer.unref();
@@ -428,6 +478,12 @@ function shutdown(signal) {
   } catch (err) {
     logWarn('wss.close', { message: err.message });
   }
+  try {
+    globalRoom.closeAll();
+    globalWss.close(() => {});
+  } catch (err) {
+    logWarn('globalWss.close', { message: err.message });
+  }
   server.close(() => {
     process.exit(0);
   });
@@ -437,15 +493,21 @@ function shutdown(signal) {
 process.once('SIGTERM', () => shutdown('SIGTERM'));
 process.once('SIGINT', () => shutdown('SIGINT'));
 
-server.listen(LISTEN_PORT, LISTEN_HOST, () => {
-  logInfo('server started', {
-    port: LISTEN_PORT,
-    host: LISTEN_HOST,
-    nodeEnv: process.env.NODE_ENV || 'development',
-    production: IS_PRODUCTION,
+// Only listen when run directly (`npm start`); tests import `server` and bind their own port.
+if (require.main === module) {
+  server.listen(LISTEN_PORT, LISTEN_HOST, () => {
+    logInfo('server started', {
+      port: LISTEN_PORT,
+      host: LISTEN_HOST,
+      nodeEnv: process.env.NODE_ENV || 'development',
+      production: IS_PRODUCTION,
+    });
+    startBreathTimers();
+    startHeartbeat();
+    logInfo('breath timers running', { rooms: Object.keys(rooms) });
+    logInfo('http routes', { root: '/', health: '/health, /healthz', roomStats: 'GET /api/rooms' });
+    logInfo('websocket paths', { breathingRooms: 'any path except /global', globalRoom: GLOBAL_WS_PATH });
   });
-  startBreathTimers();
-  startHeartbeat();
-  logInfo('breath timers running', { rooms: Object.keys(rooms) });
-  logInfo('http routes', { root: '/', health: '/health, /healthz', roomStats: 'GET /api/rooms' });
-});
+}
+
+module.exports = { server, wss, globalWss, globalRoom, GLOBAL_WS_PATH };
