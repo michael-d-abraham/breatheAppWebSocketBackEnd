@@ -13,6 +13,7 @@
 | **`LISTEN_HOST`** | `0.0.0.0` | Bind address. Use default on Render (required for external traffic). For local-only binding you could use `127.0.0.1` (not typical). |
 | **`NODE_ENV`** | unset | If `production`, used only for logging context (`production: true` in startup log). Does not change protocol behavior. |
 | **`LOG_LEVEL`** | reserved | Not read by the server yet; logs are always on at `info`/`warn`/`error`. |
+| **`DEV_COUNTRY`** | unset | Two-letter country code used for the Global Room (`/global`) when the request has no Cloudflare `CF-IPCountry` header (local dev). Unset → users get an open-ocean point. Never set this in production. |
 
 ## Client URLs (not server env)
 
